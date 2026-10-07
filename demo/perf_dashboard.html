@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RISC-V Zstd 优化 · 方案呈现与性能数据看板</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: #f5f7fa; color: #1f2933; padding: 40px 24px; line-height: 1.6;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 40px; }
+  header h1 { font-size: 28px; color: #102a43; letter-spacing: 1px; }
+  header .sub { color: #486581; font-size: 15px; margin-top: 8px; }
+  header .badge-row { margin-top: 14px; }
+  .badge {
+    display: inline-block; padding: 4px 14px; border-radius: 999px;
+    font-size: 13px; margin: 0 4px; font-weight: 600;
+  }
+  .b1 { background: #dbeafe; color: #1d4ed8; }
+  .b2 { background: #dcfce7; color: #15803d; }
+  .b3 { background: #fef3c7; color: #b45309; }
+  .b4 { background: #ede9fe; color: #6d28d9; }
+  .card {
+    background: #fff; border-radius: 14px; padding: 28px 32px;
+    box-shadow: 0 2px 10px rgba(16,42,67,.07); margin-bottom: 28px;
+  }
+  .card h2 {
+    font-size: 18px; color: #102a43; margin-bottom: 18px;
+    padding-left: 12px; border-left: 4px solid #2563eb;
+  }
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .kpi {
+    background: linear-gradient(135deg, #f0f6ff, #fff);
+    border: 1px solid #dbeafe; border-radius: 12px; padding: 18px 16px; text-align: center;
+  }
+  .kpi .num { font-size: 26px; font-weight: 800; color: #1d4ed8; }
+  .kpi .num.down { color: #dc2626; }
+  .kpi .label { font-size: 13px; color: #627d98; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { background: #f0f4f8; color: #334e68; padding: 10px 12px; text-align: left; }
+  td { padding: 10px 12px; border-bottom: 1px solid #e4ecf3; }
+  tr:last-child td { border-bottom: none; }
+  .delta { font-weight: 700; color: #dc2626; }
+  .pass { color: #15803d; font-weight: 700; }
+  .svg-box { width: 100%; overflow-x: auto; }
+  .note { font-size: 13px; color: #627d98; margin-top: 12px; }
+  .flow { display: flex; flex-wrap: wrap; gap: 0; align-items: stretch; }
+  .flow-step {
+    flex: 1 1 150px; background: #f0f6ff; border: 1px solid #dbeafe;
+    border-radius: 10px; padding: 14px 12px; text-align: center; font-size: 13px;
+    position: relative;
+  }
+  .flow-step b { display: block; color: #1d4ed8; margin-bottom: 6px; font-size: 14px; }
+  .flow-arrow { align-self: center; color: #94a3b8; font-size: 22px; padding: 0 6px; }
+  footer { text-align: center; color: #829ab1; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>面向 RISC-V 的 Zstd 压缩库性能剖析与优化实践</h1>
+  <div class="sub">从指令级分析到向量化预备 · QEMU 10.2.1 验证环境 · riscv64 交叉编译</div>
+  <div class="badge-row">
+    <span class="badge b1">组件① 指令混合度分析工具</span>
+    <span class="badge b2">组件② Zstd 批量预计算优化</span>
+    <span class="badge b3">框架适配 RocksDB</span>
+    <span class="badge b4">框架适配 SQLite</span>
+  </div>
+</header>
+
+<!-- KPI -->
+<div class="card">
+  <h2>核心指标一览</h2>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="num down">↓ 90</div><div class="label">总指令数减少（38,218 → 38,128）</div></div>
+    <div class="kpi"><div class="num">92.2%</div><div class="label">降幅集中于算术+访存指令</div></div>
+    <div class="kpi"><div class="num">3.347</div><div class="label">压缩比优化前后不变</div></div>
+    <div class="kpi"><div class="num">2 + 2</div><div class="label">基础库/组件 × 上层框架</div></div>
+  </div>
+</div>
+
+<!-- 指令混合度对比图 -->
+<div class="card">
+  <h2>指令混合度：优化前 vs 优化后</h2>
+  <div class="svg-box">
+    <svg viewBox="0 0 1000 360" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif">
+      <!-- 轴 -->
+      <line x1="90" y1="300" x2="960" y2="300" stroke="#cbd2d9" stroke-width="1"/>
+      <line x1="90" y1="40" x2="90" y2="300" stroke="#cbd2d9" stroke-width="1"/>
+      <!-- y 轴刻度 -->
+      <text x="82" y="305" font-size="11" fill="#627d98" text-anchor="end">0</text>
+      <text x="82" y="235" font-size="11" fill="#627d98" text-anchor="end">4k</text>
+      <text x="82" y="165" font-size="11" fill="#627d98" text-anchor="end">8k</text>
+      <text x="82" y="95"  font-size="11" fill="#627d98" text-anchor="end">12k</text>
+      <text x="82" y="45"  font-size="11" fill="#627d98" text-anchor="end">16k</text>
+      <line x1="90" y1="230" x2="960" y2="230" stroke="#e4ecf3" stroke-dasharray="4 4"/>
+      <line x1="90" y1="160" x2="960" y2="160" stroke="#e4ecf3" stroke-dasharray="4 4"/>
+      <line x1="90" y1="90"  x2="960" y2="90"  stroke="#e4ecf3" stroke-dasharray="4 4"/>
+
+      <!-- 刻度: 每千条 = 17.5px; y = 300 - count/1000*17.5 -->
+      <!-- 算术 16187/16153 -->
+      <rect x="130" y="17.2" width="60" height="282.8" fill="#93c5fd" rx="3"/>
+      <rect x="196" y="17.8" width="60" height="282.2" fill="#1d4ed8" rx="3"/>
+      <text x="193" y="285" font-size="12" fill="#102a43">算术</text>
+      <text x="160" y="10" font-size="11" fill="#486581" text-anchor="middle">16,187</text>
+      <text x="226" y="10" font-size="11" fill="#1d4ed8" text-anchor="middle" font-weight="bold">16,153</text>
+
+      <!-- 访存 12238/12197 -->
+      <rect x="330" y="85.8" width="60" height="214.2" fill="#93c5fd" rx="3"/>
+      <rect x="396" y="86.5" width="60" height="213.5" fill="#1d4ed8" rx="3"/>
+      <text x="393" y="285" font-size="12" fill="#102a43">访存</text>
+      <text x="360" y="78" font-size="11" fill="#486581" text-anchor="middle">12,238</text>
+      <text x="426" y="78" font-size="11" fill="#1d4ed8" text-anchor="middle" font-weight="bold">12,197</text>
+
+      <!-- 分支 3884/3877 -->
+      <rect x="530" y="232.0" width="60" height="68.0" fill="#93c5fd" rx="3"/>
+      <rect x="596" y="232.1" width="60" height="67.9" fill="#1d4ed8" rx="3"/>
+      <text x="593" y="285" font-size="12" fill="#102a43">分支</text>
+      <text x="560" y="225" font-size="11" fill="#486581" text-anchor="middle">3,884</text>
+      <text x="626" y="225" font-size="11" fill="#1d4ed8" text-anchor="middle" font-weight="bold">3,877</text>
+
+      <!-- 跳转 1754/1748 -->
+      <rect x="730" y="269.3" width="60" height="30.7" fill="#93c5fd" rx="3"/>
+      <rect x="796" y="269.4" width="60" height="30.6" fill="#1d4ed8" rx="3"/>
+      <text x="793" y="285" font-size="12" fill="#102a43">跳转</text>
+      <text x="760" y="262" font-size="11" fill="#486581" text-anchor="middle">1,754</text>
+      <text x="826" y="262" font-size="11" fill="#1d4ed8" text-anchor="middle" font-weight="bold">1,748</text>
+
+      <!-- 其他 4155/4153 -->
+      <rect x="900" y="227.3" width="60" height="72.7" fill="#93c5fd" rx="3"/>
+      <rect x="930" y="227.3" width="60" height="72.7" fill="#1d4ed8" rx="3"/>
+      <text x="927" y="285" font-size="12" fill="#102a43">其他</text>
+      <text x="920" y="220" font-size="11" fill="#486581" text-anchor="middle">4,155</text>
+      <text x="955" y="220" font-size="11" fill="#1d4ed8" text-anchor="middle" font-weight="bold">4,153</text>
+
+      <!-- 图例 -->
+      <rect x="380" y="330" width="14" height="14" fill="#93c5fd" rx="2"/>
+      <text x="400" y="342" font-size="12" fill="#486581">优化前</text>
+      <rect x="480" y="330" width="14" height="14" fill="#1d4ed8" rx="2"/>
+      <text x="500" y="342" font-size="12" fill="#486581">优化后（批量预计算哈希）</text>
+    </svg>
+  </div>
+  <div class="note">数据来源：QEMU -d in_asm 指令轨迹 × 自研 analysis_v2 工具（翻译块级计数口径）</div>
+</div>
+
+<!-- 降幅分摊 -->
+<div class="card">
+  <h2>90 条指令降幅的去向（与优化机理吻合）</h2>
+  <div class="svg-box">
+    <svg viewBox="0 0 1000 220" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif">
+      <!-- 横向条形: mem 41, arith 34, branch 7, jump 6, other 2 ; 比例 x_max=41 → 640px -->
+      <text x="90" y="42"  font-size="13" fill="#102a43" text-anchor="end">访存 ↓41</text>
+      <rect x="100" y="28" width="640" height="24" fill="#2563eb" rx="4"/>
+      <text x="748" y="45" font-size="12" fill="#486581">45.6%</text>
+      <text x="90" y="92"  font-size="13" fill="#102a43" text-anchor="end">算术 ↓34</text>
+      <rect x="100" y="78" width="531" height="24" fill="#3b82f6" rx="4"/>
+      <text x="639" y="95" font-size="12" fill="#486581">37.8%</text>
+      <text x="90" y="142" font-size="13" fill="#102a43" text-anchor="end">分支 ↓7</text>
+      <rect x="100" y="128" width="109" height="24" fill="#93c5fd" rx="4"/>
+      <text x="217" y="145" font-size="12" fill="#486581">7.8%</text>
+      <text x="90" y="192" font-size="13" fill="#102a43" text-anchor="end">跳转 ↓6</text>
+      <rect x="100" y="178" width="94" height="24" fill="#bfdbfe" rx="4"/>
+      <text x="202" y="195" font-size="12" fill="#486581">6.7%</text>
+      <text x="90" y="215" font-size="12" fill="#829ab1" text-anchor="end">其他 ↓2 (2.2%)</text>
+    </svg>
+  </div>
+  <div class="note">降幅 92.2% 集中于访存+算术 —— 正是"批量预计算消除循环内重复地址计算与哈希种子加载"的直接证据。</div>
+</div>
+
+<!-- 工作流 -->
+<div class="card">
+  <h2>全流程工作流（可复现）</h2>
+  <div class="flow">
+    <div class="flow-step"><b>交叉编译</b>zstd / RocksDB / SQLite → riscv64</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><b>QEMU 运行基准</b>zstd bench · db_bench · sqlite_zstd_bench</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><b>功能验证</b>压缩比 / 数据完整性 / 读回校验</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><b>-d in_asm 抓轨迹</b>翻译块级指令日志</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><b>analysis_v2</b>单日志统计 / 双日志 diff</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><b>对比报告</b>Markdown 自动嵌入文档</div>
+  </div>
+</div>
+
+<!-- 数据表 -->
+<div class="card">
+  <h2>完整对比数据</h2>
+  <table>
+    <tr><th>指令类别</th><th>优化前</th><th>占比</th><th>优化后</th><th>占比</th><th>变化</th></tr>
+    <tr><td><b>总指令数</b></td><td><b>38,218</b></td><td>100%</td><td><b>38,128</b></td><td>100%</td><td class="delta">↓ 90 条 (0.24%)</td></tr>
+    <tr><td>算术指令</td><td>16,187</td><td>42.35%</td><td>16,153</td><td>42.37%</td><td class="delta">↓ 34</td></tr>
+    <tr><td>访存指令</td><td>12,238</td><td>32.02%</td><td>12,197</td><td>31.99%</td><td class="delta">↓ 41</td></tr>
+    <tr><td>分支指令</td><td>3,884</td><td>10.16%</td><td>3,877</td><td>10.17%</td><td class="delta">↓ 7</td></tr>
+    <tr><td>跳转指令</td><td>1,754</td><td>4.59%</td><td>1,748</td><td>4.58%</td><td class="delta">↓ 6</td></tr>
+    <tr><td>其他指令</td><td>4,155</td><td>10.87%</td><td>4,153</td><td>10.89%</td><td class="delta">↓ 2</td></tr>
+    <tr><td>压缩比</td><td colspan="2">3.347</td><td colspan="2">3.347</td><td class="pass">不变 ✅</td></tr>
+  </table>
+</div>
+
+<!-- 跨框架对比 -->
+<div class="card">
+  <h2>跨框架指令混合度实测（三场景）</h2>
+  <div class="svg-box">
+    <svg viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif" role="img" aria-label="三个场景指令混合度堆叠条形图">
+      <title>三场景指令混合度</title>
+      <!-- 堆叠条：100% = 640px, 起点 x=200 -->
+      <!-- Zstd: 42.35/32.02/10.16/4.59/10.87 -->
+      <text x="190" y="70" font-size="13" fill="#102a43" text-anchor="end">Zstd 基准</text>
+      <text x="190" y="86" font-size="11" fill="#829ab1" text-anchor="end">38,218 条</text>
+      <rect x="200" y="55" width="271" height="26" fill="#1d4ed8"/>
+      <rect x="471" y="55" width="205" height="26" fill="#60a5fa"/>
+      <rect x="676" y="55" width="65"  height="26" fill="#f59e0b"/>
+      <rect x="741" y="55" width="29"  height="26" fill="#a78bfa"/>
+      <rect x="770" y="55" width="70"  height="26" fill="#cbd5e1"/>
+      <!-- RocksDB: 43.83/41.33/6.23/7.01/1.60 -->
+      <text x="190" y="140" font-size="13" fill="#102a43" text-anchor="end">RocksDB</text>
+      <text x="190" y="156" font-size="11" fill="#829ab1" text-anchor="end">590,871 条</text>
+      <rect x="200" y="125" width="280" height="26" fill="#1d4ed8"/>
+      <rect x="480" y="125" width="264" height="26" fill="#60a5fa"/>
+      <rect x="744" y="125" width="40"  height="26" fill="#f59e0b"/>
+      <rect x="784" y="125" width="45"  height="26" fill="#a78bfa"/>
+      <rect x="829" y="125" width="10"  height="26" fill="#cbd5e1"/>
+      <!-- SQLite: 31.42/43.53/10.33/6.17/8.55 -->
+      <text x="190" y="210" font-size="13" fill="#102a43" text-anchor="end">SQLite</text>
+      <text x="190" y="226" font-size="11" fill="#829ab1" text-anchor="end">96,272 条</text>
+      <rect x="200" y="195" width="201" height="26" fill="#1d4ed8"/>
+      <rect x="401" y="195" width="279" height="26" fill="#60a5fa"/>
+      <rect x="680" y="195" width="66"  height="26" fill="#f59e0b"/>
+      <rect x="746" y="195" width="39"  height="26" fill="#a78bfa"/>
+      <rect x="785" y="195" width="55"  height="26" fill="#cbd5e1"/>
+
+      <!-- 图例 -->
+      <rect x="200" y="255" width="12" height="12" fill="#1d4ed8" rx="2"/>
+      <text x="218" y="266" font-size="12" fill="#486581">算术</text>
+      <rect x="270" y="255" width="12" height="12" fill="#60a5fa" rx="2"/>
+      <text x="288" y="266" font-size="12" fill="#486581">访存</text>
+      <rect x="340" y="255" width="12" height="12" fill="#f59e0b" rx="2"/>
+      <text x="358" y="266" font-size="12" fill="#486581">分支</text>
+      <rect x="410" y="255" width="12" height="12" fill="#a78bfa" rx="2"/>
+      <text x="428" y="266" font-size="12" fill="#486581">跳转</text>
+      <rect x="480" y="255" width="12" height="12" fill="#cbd5e1" rx="2"/>
+      <text x="498" y="266" font-size="12" fill="#486581">其他</text>
+      <text x="840" y="266" font-size="11" fill="#829ab1">readelf -d 已验证 libzstd.so.1 链接</text>
+    </svg>
+  </div>
+  <div class="note">三个场景画像差异明显：Zstd 算术密集（42.35%）、RocksDB 算术+访存并重（43.83%/41.33%）、SQLite 访存密集（43.53%）——分析工具的跨框架通用性得到实测验证。</div>
+</div>
+
+<!-- 框架矩阵 -->
+<div class="card">
+  <h2>组件 × 框架适配矩阵</h2>
+  <table>
+    <tr><th></th><th>组件① 分析工具</th><th>组件② Zstd 优化</th></tr>
+    <tr><td><b>RocksDB（框架一）</b></td><td>db_bench 指令轨迹 diff</td><td>BlockBasedTable zstd 压缩路径（librocksdb.a + db_bench）</td></tr>
+    <tr><td><b>SQLite（框架二）</b></td><td>sqlite_zstd_bench 指令轨迹统计</td><td>Blob 压缩存储（写前压缩 / 读后解压校验）</td></tr>
+    <tr><td><b>验证环境</b></td><td colspan="2">QEMU 10.2.1 用户态 · qemu-riscv64 · RuyiSDK 虚拟环境</td></tr>
+  </table>
+</div>
+
+<!-- 路线图 -->
+<div class="card">
+  <h2>向量化预备（RVV 1.0 路线）</h2>
+  <table>
+    <tr><th>阶段</th><th>内容</th><th>预期</th></tr>
+    <tr><td>已完成</td><td>批量预计算哈希（标量级）</td><td>指令数 ↓0.24%，方向验证 ✅</td></tr>
+    <tr><td>下一步</td><td>哈希计算 RVV 向量化（vxor/vsll/vmerge，8×u64 / 向量寄存器）</td><td>算术指令数量级下降</td></tr>
+    <tr><td>下一步</td><td>ZSTD_count 匹配循环向量化（vle64+vxor+vmsne）</td><td>匹配比较加速</td></tr>
+    <tr><td>配套</td><td>analysis_v2 增加 RVV 子类统计（v*.vv / vl* / vs*）</td><td>量化向量指令占比</td></tr>
+    <tr><td>硬件验证</td><td>VisionFive 2 / SG2042 真机 perf 计数</td><td>补充硬件级数据</td></tr>
+  </table>
+</div>
+
+<footer>面向 RISC-V 的 Zstd 压缩库性能剖析与优化实践 · 参赛方案呈现材料 · 2026-10</footer>
+</div>
+</body>
+</html>

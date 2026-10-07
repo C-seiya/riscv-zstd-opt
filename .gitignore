@@ -1,0 +1,10 @@
+# 本地工作区元数据（含个人记忆与工具缓存）
+.workbuddy/
+
+# 剪辑中间产物（抽帧、片段、卡片）
+build/
+!build/.gitkeep
+
+# 系统文件
+Thumbs.db
+.DS_Store
